@@ -17,8 +17,7 @@ st.set_page_config(
 def load_and_process_data(uploaded_files):
     """
     Carga, une y limpia los datos de los archivos CSV subidos.
-    Esta versión es robusta contra espacios en blanco en los encabezados
-    y diferentes delimitadores (coma o punto y coma).
+    Versión final adaptada al formato de fecha DD-MM-YY.
     """
     if not uploaded_files:
         return pd.DataFrame()
@@ -28,32 +27,22 @@ def load_and_process_data(uploaded_files):
 
     for file in uploaded_files:
         try:
-            # Leer el archivo en memoria para poder reutilizarlo
+            # Leer el archivo con el delimitador correcto y limpiar encabezados
             file_content = file.getvalue()
-            
-            # Intentar con coma como delimitador
             df = pd.read_csv(io.BytesIO(file_content), sep=',', skipinitialspace=True)
-            
-            # Si solo hay una columna, el delimitador probablemente es incorrecto. Intentar con punto y coma.
-            if len(df.columns) == 1:
-                df = pd.read_csv(io.BytesIO(file_content), sep=';', skipinitialspace=True)
-
-            # --- CORRECCIÓN CLAVE: Limpiar nombres de columnas ---
-            # Elimina cualquier espacio en blanco al principio o al final de los nombres de las columnas.
             df.columns = df.columns.str.strip()
 
-            # Verificar si todas las columnas necesarias existen DESPUÉS de limpiarlas.
+            # Verificar si las columnas necesarias existen
             if not all(col in df.columns for col in required_cols):
                 st.warning(f"El archivo {file.name} no contiene todas las columnas requeridas ({', '.join(required_cols)}). Se omitirá.")
                 continue
 
-            # --- 1. Extracción del Dominio desde la URL ---
-            df['dominio'] = df['URL'].apply(lambda url: urlparse(str(url)).netloc.replace('www.', ''))
-            
-            # --- 2. Procesamiento de la Fecha ---
-            df['fecha'] = pd.to_datetime(df['date'], format='%d%m%y', errors='coerce')
+            # --- CORRECCIÓN DEFINITIVA: Formato de fecha con guiones ---
+            # El formato '%d-%m-%y' coincide con '25-06-18'.
+            df['fecha'] = pd.to_datetime(df['date'], format='%d-%m-%y', errors='coerce')
 
-            # --- 3. Renombrar 'Keyword' a 'producto' para claridad ---
+            # --- Procesamiento del resto de los datos ---
+            df['dominio'] = df['URL'].apply(lambda url: urlparse(str(url)).netloc.replace('www.', ''))
             df.rename(columns={'Keyword': 'producto'}, inplace=True)
             
             all_data.append(df)
@@ -67,8 +56,13 @@ def load_and_process_data(uploaded_files):
     full_df = pd.concat(all_data, ignore_index=True)
 
     # --- Limpieza de Datos ---
-    full_df.dropna(subset=['fecha', 'dominio'], inplace=True)
+    # Eliminar filas donde la fecha no se pudo convertir.
+    full_df.dropna(subset=['fecha'], inplace=True)
+    if full_df.empty:
+        st.error("Error en el formato de fecha. Asegúrate que las fechas en la columna 'date' tengan el formato DD-MM-YY (ej: 25-06-18).")
+        return pd.DataFrame()
 
+    # Limpieza de la columna 'price'
     price_series = full_df['price'].astype(str)
     price_series = price_series.str.replace(r'[$.]', '', regex=True).str.replace(',', '.', regex=False).str.strip()
     full_df['price'] = pd.to_numeric(price_series, errors='coerce')
@@ -102,12 +96,11 @@ with st.sidebar:
     df = load_and_process_data(uploaded_files)
 
     if df.empty:
-        st.error("No se pudieron cargar datos válidos de los archivos subidos. Revisa su contenido y formato.")
+        st.warning("No se pudieron cargar datos válidos de los archivos subidos. Revisa el mensaje de error de arriba.")
         st.stop()
 
     st.success(f"{len(df)} registros cargados de {len(uploaded_files)} archivos.")
 
-    # --- Filtros dinámicos basados en los datos cargados ---
     min_date = df['fecha'].min().date()
     max_date = df['fecha'].max().date()
     
@@ -130,7 +123,7 @@ with st.sidebar:
     else:
         selected_price_levels = []
 
-# --- Filtrado del DataFrame Principal ---
+# --- Filtrado del DataFrame ---
 if len(selected_date_range) == 2:
     start_date, end_date = selected_date_range
     mask_date = (df['fecha'].dt.date >= start_date) & (df['fecha'].dt.date <= end_date)
@@ -141,7 +134,6 @@ if len(selected_date_range) == 2:
         (df['dominio'].isin(selected_domains))
     ]
     if 'price_level' in filtered_df.columns and selected_price_levels:
-        # Asegurarse de que el filtro de price_level no falle si el usuario no selecciona nada
         if selected_price_levels:
             filtered_df = filtered_df[filtered_df['price_level'].isin(selected_price_levels)]
 else:
@@ -154,7 +146,6 @@ if filtered_df.empty:
     st.warning("No hay datos para mostrar con los filtros seleccionados.")
 else:
     st.subheader("1. Evolución de Precios por Producto")
-    # Para evitar errores, solo hacer facet_row si hay más de un producto
     if len(filtered_df['producto'].unique()) > 1:
         fig_evolucion = px.line(
             filtered_df, x='fecha', y='price', color='dominio',
@@ -208,4 +199,3 @@ else:
         cols_to_display = ['fecha', 'producto', 'price', 'dominio', 'price_level', 'title', 'position', 'URL']
         display_cols = [col for col in cols_to_display if col in filtered_df.columns]
         st.dataframe(filtered_df[display_cols].style.format({'price': "AR$ {:,.2f}", 'fecha': '{:%Y-%m-%d}'}))
-
