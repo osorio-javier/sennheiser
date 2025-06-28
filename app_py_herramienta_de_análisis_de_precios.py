@@ -26,16 +26,18 @@ def load_and_process_data(uploaded_files):
         try:
             df = pd.read_csv(file)
             
-            # --- CORRECCIÓN: Manejar 'Fecha' o 'fecha' ---
-            # Se busca la columna de fecha sin importar si es mayúscula o minúscula.
+            # --- CORRECCIÓN MEJORADA: Manejar 'Fecha', 'fecha', 'Date', 'date' ---
+            # Itera sobre una lista de posibles nombres para la columna de fecha.
             date_col = None
-            if 'Fecha' in df.columns:
-                date_col = 'Fecha'
-            elif 'fecha' in df.columns:
-                date_col = 'fecha'
-            else:
+            possible_date_cols = ['Fecha', 'fecha', 'Date', 'date']
+            for col in possible_date_cols:
+                if col in df.columns:
+                    date_col = col
+                    break # Se encontró la columna, se detiene la búsqueda.
+            
+            if not date_col:
                 # Si no se encuentra ninguna columna de fecha, se salta este archivo.
-                st.warning(f"El archivo {file.name} no contiene una columna 'Fecha' o 'fecha'.")
+                st.warning(f"El archivo {file.name} no contiene una columna de fecha válida (se buscó: {', '.join(possible_date_cols)}).")
                 continue
 
             # --- Procesamiento de Fecha ---
@@ -98,7 +100,7 @@ with st.sidebar:
     df = load_and_process_data(uploaded_files)
 
     if df.empty:
-        st.error("No se pudieron cargar datos válidos de los archivos. Revisa el formato de los CSV y asegúrate de que contengan una columna 'Fecha'.")
+        st.error("No se pudieron cargar datos válidos de los archivos. Revisa el formato de los CSV y asegúrate de que contengan una columna de fecha.")
         st.stop()
 
     st.success(f"{len(df)} registros cargados de {len(uploaded_files)} archivos.")
@@ -138,7 +140,7 @@ with st.sidebar:
             default=all_price_levels,
         )
     except KeyError:
-        st.warning("No se encontró la columna 'price_level' en los datos.")
+        # No mostramos advertencia si no existe, simplemente no se muestra el filtro.
         selected_price_levels = []
 
 
@@ -233,5 +235,7 @@ else:
     
     # --- Expander para ver los datos crudos ---
     with st.expander("Ver tabla de datos filtrados"):
-        display_df = filtered_df.drop(columns=['precio_minimo', 'es_precio_mas_bajo', 'Fecha'], errors='ignore')
+        # Preparamos las columnas a eliminar para evitar errores si no existen
+        cols_to_drop = [col for col in ['precio_minimo', 'es_precio_mas_bajo', 'Fecha', 'fecha', 'Date', 'date'] if col in filtered_df.columns]
+        display_df = filtered_df.drop(columns=cols_to_drop)
         st.dataframe(display_df.style.format({'precio': "AR$ {:,.2f}", 'fecha': '{:%Y-%m-%d}'}))
