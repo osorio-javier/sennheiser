@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from urllib.parse import urlparse
+import io
 
 # --- Configuración de la Página de Streamlit ---
 st.set_page_config(
@@ -16,31 +17,40 @@ st.set_page_config(
 def load_and_process_data(uploaded_files):
     """
     Carga, une y limpia los datos de los archivos CSV subidos.
-    Esta versión está adaptada a los encabezados exactos del CSV:
-    Keyword, position, title, price, price_level, URL, date
+    Esta versión es robusta contra espacios en blanco en los encabezados
+    y diferentes delimitadores (coma o punto y coma).
     """
     if not uploaded_files:
         return pd.DataFrame()
 
     all_data = []
-    # Columnas esperadas en el CSV
     required_cols = ['Keyword', 'price', 'URL', 'date']
 
     for file in uploaded_files:
         try:
-            df = pd.read_csv(file)
+            # Leer el archivo en memoria para poder reutilizarlo
+            file_content = file.getvalue()
             
-            # Verificar si todas las columnas necesarias existen
+            # Intentar con coma como delimitador
+            df = pd.read_csv(io.BytesIO(file_content), sep=',', skipinitialspace=True)
+            
+            # Si solo hay una columna, el delimitador probablemente es incorrecto. Intentar con punto y coma.
+            if len(df.columns) == 1:
+                df = pd.read_csv(io.BytesIO(file_content), sep=';', skipinitialspace=True)
+
+            # --- CORRECCIÓN CLAVE: Limpiar nombres de columnas ---
+            # Elimina cualquier espacio en blanco al principio o al final de los nombres de las columnas.
+            df.columns = df.columns.str.strip()
+
+            # Verificar si todas las columnas necesarias existen DESPUÉS de limpiarlas.
             if not all(col in df.columns for col in required_cols):
                 st.warning(f"El archivo {file.name} no contiene todas las columnas requeridas ({', '.join(required_cols)}). Se omitirá.")
                 continue
 
             # --- 1. Extracción del Dominio desde la URL ---
-            # La función urlparse extrae las partes de una URL. `netloc` es el dominio.
-            df['dominio'] = df['URL'].apply(lambda url: urlparse(url).netloc.replace('www.', ''))
+            df['dominio'] = df['URL'].apply(lambda url: urlparse(str(url)).netloc.replace('www.', ''))
             
             # --- 2. Procesamiento de la Fecha ---
-            # Se usa la columna 'date' directamente.
             df['fecha'] = pd.to_datetime(df['date'], format='%d%m%y', errors='coerce')
 
             # --- 3. Renombrar 'Keyword' a 'producto' para claridad ---
@@ -48,7 +58,7 @@ def load_and_process_data(uploaded_files):
             
             all_data.append(df)
         except Exception as e:
-            st.warning(f"Ocurrió un error al procesar el archivo {file.name}: {e}")
+            st.error(f"Ocurrió un error crítico al procesar el archivo {file.name}: {e}")
             continue
 
     if not all_data:
@@ -57,15 +67,12 @@ def load_and_process_data(uploaded_files):
     full_df = pd.concat(all_data, ignore_index=True)
 
     # --- Limpieza de Datos ---
-    # Eliminar filas donde la fecha o el dominio no se pudieron procesar
     full_df.dropna(subset=['fecha', 'dominio'], inplace=True)
 
-    # Limpieza de la columna 'price'
     price_series = full_df['price'].astype(str)
-    price_series = price_series.str.replace(r'[$.]', '', regex=True).str.replace(',', '.', regex=False)
+    price_series = price_series.str.replace(r'[$.]', '', regex=True).str.replace(',', '.', regex=False).str.strip()
     full_df['price'] = pd.to_numeric(price_series, errors='coerce')
     
-    # Eliminar filas donde el precio es nulo después de la limpieza.
     full_df.dropna(subset=['price'], inplace=True)
     
     # --- Cálculo de Precios Mínimos ---
@@ -95,7 +102,7 @@ with st.sidebar:
     df = load_and_process_data(uploaded_files)
 
     if df.empty:
-        st.error("No se pudieron cargar datos válidos. Revisa que los archivos tengan las columnas: Keyword, price, URL, date.")
+        st.error("No se pudieron cargar datos válidos de los archivos subidos. Revisa su contenido y formato.")
         st.stop()
 
     st.success(f"{len(df)} registros cargados de {len(uploaded_files)} archivos.")
@@ -126,7 +133,6 @@ with st.sidebar:
 # --- Filtrado del DataFrame Principal ---
 if len(selected_date_range) == 2:
     start_date, end_date = selected_date_range
-    # Asegurarse que las fechas de df son solo date para comparar
     mask_date = (df['fecha'].dt.date >= start_date) & (df['fecha'].dt.date <= end_date)
     
     filtered_df = df[
@@ -135,7 +141,9 @@ if len(selected_date_range) == 2:
         (df['dominio'].isin(selected_domains))
     ]
     if 'price_level' in filtered_df.columns and selected_price_levels:
-        filtered_df = filtered_df[filtered_df['price_level'].isin(selected_price_levels)]
+        # Asegurarse de que el filtro de price_level no falle si el usuario no selecciona nada
+        if selected_price_levels:
+            filtered_df = filtered_df[filtered_df['price_level'].isin(selected_price_levels)]
 else:
     filtered_df = pd.DataFrame()
 
@@ -145,13 +153,19 @@ st.header("📊 Visualización de Datos")
 if filtered_df.empty:
     st.warning("No hay datos para mostrar con los filtros seleccionados.")
 else:
-    # Graficos y tablas...
     st.subheader("1. Evolución de Precios por Producto")
-    fig_evolucion = px.line(
-        filtered_df, x='fecha', y='price', color='dominio',
-        facet_row='producto', markers=True, title="Evolución de Precios a lo Largo del Tiempo"
-    )
-    fig_evolucion.update_layout(height=300 * len(filtered_df['producto'].unique()))
+    # Para evitar errores, solo hacer facet_row si hay más de un producto
+    if len(filtered_df['producto'].unique()) > 1:
+        fig_evolucion = px.line(
+            filtered_df, x='fecha', y='price', color='dominio',
+            facet_row='producto', markers=True, title="Evolución de Precios a lo Largo del Tiempo"
+        )
+        fig_evolucion.update_layout(height=300 * len(filtered_df['producto'].unique()))
+    else:
+         fig_evolucion = px.line(
+            filtered_df, x='fecha', y='price', color='dominio',
+            markers=True, title="Evolución de Precios a lo Largo del Tiempo"
+        )
     fig_evolucion.update_yaxes(matches=None, title="Precio (AR$)")
     st.plotly_chart(fig_evolucion, use_container_width=True)
 
@@ -194,3 +208,4 @@ else:
         cols_to_display = ['fecha', 'producto', 'price', 'dominio', 'price_level', 'title', 'position', 'URL']
         display_cols = [col for col in cols_to_display if col in filtered_df.columns]
         st.dataframe(filtered_df[display_cols].style.format({'price': "AR$ {:,.2f}", 'fecha': '{:%Y-%m-%d}'}))
+
