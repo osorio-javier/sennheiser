@@ -37,8 +37,7 @@ def load_and_process_data(uploaded_files):
                 st.warning(f"El archivo {file.name} no contiene todas las columnas requeridas ({', '.join(required_cols)}). Se omitirá.")
                 continue
 
-            # --- CORRECCIÓN DEFINITIVA: Formato de fecha con guiones ---
-            # El formato '%d-%m-%y' coincide con '25-06-18'.
+            # --- Formato de fecha con guiones ---
             df['fecha'] = pd.to_datetime(df['date'], format='%d-%m-%y', errors='coerce')
 
             # --- Procesamiento del resto de los datos ---
@@ -55,19 +54,22 @@ def load_and_process_data(uploaded_files):
 
     full_df = pd.concat(all_data, ignore_index=True)
 
-    # --- Limpieza de Datos ---
-    # Eliminar filas donde la fecha no se pudo convertir.
+    # --- Limpieza y Transformación de Datos ---
     full_df.dropna(subset=['fecha'], inplace=True)
     if full_df.empty:
-        st.error("Error en el formato de fecha. Asegúrate que las fechas en la columna 'date' tengan el formato DD-MM-YY (ej: 25-06-18).")
+        st.error("Error en el formato de fecha. Asegúrate que las fechas tengan el formato DD-MM-YY.")
         return pd.DataFrame()
 
     # Limpieza de la columna 'price'
     price_series = full_df['price'].astype(str)
-    price_series = price_series.str.replace(r'[$.]', '', regex=True).str.replace(',', '.', regex=False).str.strip()
+    price_series = price_series.str.replace(r'[^\d,.]', '', regex=True).str.replace(',', '', regex=True)
     full_df['price'] = pd.to_numeric(price_series, errors='coerce')
-    
     full_df.dropna(subset=['price'], inplace=True)
+
+    # --- Conversión de 'price_level' a valor numérico ---
+    if 'price_level' in full_df.columns:
+        level_map = {'bajo': 1, 'medio': 2, 'alto': 3}
+        full_df['price_level_numeric'] = full_df['price_level'].str.lower().map(level_map)
     
     # --- Cálculo de Precios Mínimos ---
     full_df['precio_minimo'] = full_df.groupby(['fecha', 'producto'])['price'].transform('min')
@@ -96,7 +98,7 @@ with st.sidebar:
     df = load_and_process_data(uploaded_files)
 
     if df.empty:
-        st.warning("No se pudieron cargar datos válidos de los archivos subidos. Revisa el mensaje de error de arriba.")
+        st.warning("No se pudieron cargar datos válidos. Revisa el mensaje de error de arriba.")
         st.stop()
 
     st.success(f"{len(df)} registros cargados de {len(uploaded_files)} archivos.")
@@ -145,32 +147,94 @@ st.header("📊 Visualización de Datos")
 if filtered_df.empty:
     st.warning("No hay datos para mostrar con los filtros seleccionados.")
 else:
+    # --- Gráfico único con selector de producto ---
     st.subheader("1. Evolución de Precios por Producto")
-    if len(filtered_df['producto'].unique()) > 1:
+    
+    product_options = sorted(filtered_df['producto'].unique())
+    if product_options:
+        selected_product_for_line_chart = st.selectbox(
+            "Selecciona un producto para ver su evolución de precios:",
+            options=product_options
+        )
+
+        # Filtrar el dataframe para el producto seleccionado
+        line_chart_df = filtered_df[filtered_df['producto'] == selected_product_for_line_chart]
+
+        # Crear el gráfico de línea único
         fig_evolucion = px.line(
-            filtered_df, x='fecha', y='price', color='dominio',
-            facet_row='producto', markers=True, title="Evolución de Precios a lo Largo del Tiempo"
+            line_chart_df,
+            x='fecha',
+            y='price',
+            color='dominio',
+            markers=True,
+            title=f"Evolución de Precios para: {selected_product_for_line_chart}"
         )
-        fig_evolucion.update_layout(height=300 * len(filtered_df['producto'].unique()))
+        fig_evolucion.update_yaxes(matches=None, title="Precio")
+        st.plotly_chart(fig_evolucion, use_container_width=True)
     else:
-         fig_evolucion = px.line(
-            filtered_df, x='fecha', y='price', color='dominio',
-            markers=True, title="Evolución de Precios a lo Largo del Tiempo"
+        st.info("No hay productos disponibles en el DataFrame filtrado para mostrar este gráfico.")
+
+    
+    # --- Gráfico de Evolución de Nivel de Precio ---
+    st.subheader("2. Evolución de Nivel de Precio por Competidor")
+    if 'price_level_numeric' in filtered_df.columns:
+        price_level_evolution = filtered_df.groupby(['fecha', 'dominio'])['price_level_numeric'].mean().reset_index()
+
+        fig_level = px.line(
+            price_level_evolution,
+            x='fecha',
+            y='price_level_numeric',
+            color='dominio',
+            markers=True,
+            title="Estrategia de Posicionamiento de Precios en el Tiempo"
         )
-    fig_evolucion.update_yaxes(matches=None, title="Precio (AR$)")
-    st.plotly_chart(fig_evolucion, use_container_width=True)
+        
+        fig_level.update_yaxes(
+            title="Nivel de Precio Promedio",
+            tickvals=[1, 2, 3],
+            ticktext=['Bajo', 'Medio', 'Alto']
+        )
+        st.plotly_chart(fig_level, use_container_width=True)
+    else:
+        st.info("La columna 'price_level' no se encontró en los datos para generar este gráfico.")
 
-    st.subheader("2. Ranking de Competidores con Precios Bajos")
-    lowest_price_counts = filtered_df[filtered_df['es_precio_mas_bajo']]['dominio'].value_counts().reset_index()
-    lowest_price_counts.columns = ['dominio', 'cantidad_precios_bajos']
-    fig_ranking = px.bar(
-        lowest_price_counts, x='dominio', y='cantidad_precios_bajos', color='dominio',
-        title="Frecuencia con la que un Competidor Ofrece el Precio Más Bajo",
-        labels={'dominio':'Competidor', 'cantidad_precios_bajos':'Nº de Veces con Precio Más Bajo'}
-    )
-    st.plotly_chart(fig_ranking, use_container_width=True)
 
-    st.subheader("3. Comparativa de Precios en un Día Específico")
+    # --- CAMBIO: Gráfico de ranking dinámico por price_level ---
+    st.subheader("3. Ranking de Competidores por Rango de Precio")
+    if 'price_level' in filtered_df.columns:
+        # Crear opciones para el selector, incluyendo 'Todos'
+        level_options = ['Todos'] + sorted(filtered_df['price_level'].dropna().unique())
+        
+        selected_level_for_ranking = st.selectbox(
+            "Selecciona un rango de precio para el ranking:",
+            options=level_options
+        )
+
+        # Filtrar datos según la selección
+        ranking_df = filtered_df
+        if selected_level_for_ranking != 'Todos':
+            ranking_df = filtered_df[filtered_df['price_level'] == selected_level_for_ranking]
+
+        # Calcular la frecuencia de aparición
+        ranking_counts = ranking_df['dominio'].value_counts().reset_index()
+        ranking_counts.columns = ['dominio', 'frecuencia']
+
+        # Crear el gráfico de barras
+        fig_ranking = px.bar(
+            ranking_counts, 
+            x='dominio', 
+            y='frecuencia', 
+            color='dominio',
+            title=f"Frecuencia de Aparición en Rango de Precio: '{selected_level_for_ranking.title()}'",
+            labels={'dominio':'Competidor', 'frecuencia':'Número de Apariciones'}
+        )
+        st.plotly_chart(fig_ranking, use_container_width=True)
+
+    else:
+        st.info("La columna 'price_level' no se encontró, no se puede generar el ranking por rango.")
+
+
+    st.subheader("4. Comparativa de Precios en un Día Específico")
     col1, col2 = st.columns(2)
     with col1:
         available_dates = sorted(filtered_df['fecha'].dt.date.unique(), reverse=True)
@@ -188,9 +252,9 @@ else:
             fig_snapshot = px.bar(
                 snapshot_df, x='dominio', y='price', color='dominio',
                 title=f"Precios para '{selected_product_for_bar}' el {selected_date_for_bar}",
-                labels={'dominio':'Competidor', 'price':'Precio (AR$)'}, text='price'
+                labels={'dominio':'Competidor', 'price':'Precio'}, text='price'
             )
-            fig_snapshot.update_traces(texttemplate='$%{text:,.0f}', textposition='outside')
+            fig_snapshot.update_traces(texttemplate='%{text}', textposition='outside')
             st.plotly_chart(fig_snapshot, use_container_width=True)
         else:
             st.info(f"No hay datos para '{selected_product_for_bar}' en la fecha seleccionada.")
@@ -198,4 +262,4 @@ else:
     with st.expander("Ver tabla de datos filtrados"):
         cols_to_display = ['fecha', 'producto', 'price', 'dominio', 'price_level', 'title', 'position', 'URL']
         display_cols = [col for col in cols_to_display if col in filtered_df.columns]
-        st.dataframe(filtered_df[display_cols].style.format({'price': "AR$ {:,.2f}", 'fecha': '{:%Y-%m-%d}'}))
+        st.dataframe(filtered_df[display_cols].style.format({'fecha': '{:%Y-%m-%d}'}))
