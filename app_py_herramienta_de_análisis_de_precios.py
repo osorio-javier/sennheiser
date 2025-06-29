@@ -17,7 +17,7 @@ st.set_page_config(
 def load_and_process_data(uploaded_files):
     """
     Carga, une y limpia los datos de los archivos CSV subidos.
-    Versión final adaptada al formato de fecha DD-MM-YY.
+    Versión final adaptada al formato de fecha DD-MM-YYYY.
     """
     if not uploaded_files:
         return pd.DataFrame()
@@ -37,8 +37,8 @@ def load_and_process_data(uploaded_files):
                 st.warning(f"El archivo {file.name} no contiene todas las columnas requeridas ({', '.join(required_cols)}). Se omitirá.")
                 continue
 
-            # --- Formato de fecha con guiones ---
-            df['fecha'] = pd.to_datetime(df['date'], format='%d-%m-%y', errors='coerce')
+            # --- CORRECCIÓN: Formato de fecha con año de 4 dígitos (YYYY) ---
+            df['fecha'] = pd.to_datetime(df['date'], format='%d-%m-%Y', errors='coerce')
 
             # --- Procesamiento del resto de los datos ---
             df['dominio'] = df['URL'].apply(lambda url: urlparse(str(url)).netloc.replace('www.', ''))
@@ -57,7 +57,7 @@ def load_and_process_data(uploaded_files):
     # --- Limpieza y Transformación de Datos ---
     full_df.dropna(subset=['fecha'], inplace=True)
     if full_df.empty:
-        st.error("Error en el formato de fecha. Asegúrate que las fechas tengan el formato DD-MM-YY.")
+        st.error("Error en el formato de fecha. Asegúrate que las fechas tengan el formato DD-MM-YYYY.")
         return pd.DataFrame()
 
     # Limpieza de la columna 'price'
@@ -103,6 +103,13 @@ with st.sidebar:
 
     st.success(f"{len(df)} registros cargados de {len(uploaded_files)} archivos.")
 
+    # --- CAMBIO CLAVE: Crear un mapa de colores consistente para los dominios ---
+    all_domains_list = sorted(df['dominio'].unique())
+    # Usamos una paleta de colores cualitativa de Plotly
+    color_sequence = px.colors.qualitative.Plotly 
+    color_map = {domain: color_sequence[i % len(color_sequence)] for i, domain in enumerate(all_domains_list)}
+
+
     min_date = df['fecha'].min().date()
     max_date = df['fecha'].max().date()
     
@@ -116,8 +123,8 @@ with st.sidebar:
     all_products = sorted(df['producto'].unique())
     selected_products = st.multiselect("3. Selecciona Productos (Keywords)", options=all_products, default=all_products)
 
-    all_domains = sorted(df['dominio'].unique())
-    selected_domains = st.multiselect("4. Selecciona Competidores", options=all_domains, default=all_domains)
+    all_domains_in_filter = sorted(df['dominio'].unique())
+    selected_domains = st.multiselect("4. Selecciona Competidores", options=all_domains_in_filter, default=all_domains_in_filter)
     
     if 'price_level' in df.columns:
         all_price_levels = sorted(df['price_level'].dropna().unique())
@@ -157,17 +164,16 @@ else:
             options=product_options
         )
 
-        # Filtrar el dataframe para el producto seleccionado
         line_chart_df = filtered_df[filtered_df['producto'] == selected_product_for_line_chart]
 
-        # Crear el gráfico de línea único
         fig_evolucion = px.line(
             line_chart_df,
             x='fecha',
             y='price',
             color='dominio',
             markers=True,
-            title=f"Evolución de Precios para: {selected_product_for_line_chart}"
+            title=f"Evolución de Precios para: {selected_product_for_line_chart}",
+            color_discrete_map=color_map # Aplicar mapa de colores
         )
         fig_evolucion.update_yaxes(matches=None, title="Precio")
         st.plotly_chart(fig_evolucion, use_container_width=True)
@@ -186,7 +192,8 @@ else:
             y='price_level_numeric',
             color='dominio',
             markers=True,
-            title="Estrategia de Posicionamiento de Precios en el Tiempo"
+            title="Estrategia de Posicionamiento de Precios en el Tiempo",
+            color_discrete_map=color_map # Aplicar mapa de colores
         )
         
         fig_level.update_yaxes(
@@ -199,10 +206,9 @@ else:
         st.info("La columna 'price_level' no se encontró en los datos para generar este gráfico.")
 
 
-    # --- CAMBIO: Gráfico de ranking dinámico por price_level ---
+    # --- Gráfico de ranking dinámico por price_level ---
     st.subheader("3. Ranking de Competidores por Rango de Precio")
     if 'price_level' in filtered_df.columns:
-        # Crear opciones para el selector, incluyendo 'Todos'
         level_options = ['Todos'] + sorted(filtered_df['price_level'].dropna().unique())
         
         selected_level_for_ranking = st.selectbox(
@@ -210,23 +216,21 @@ else:
             options=level_options
         )
 
-        # Filtrar datos según la selección
         ranking_df = filtered_df
         if selected_level_for_ranking != 'Todos':
             ranking_df = filtered_df[filtered_df['price_level'] == selected_level_for_ranking]
 
-        # Calcular la frecuencia de aparición
         ranking_counts = ranking_df['dominio'].value_counts().reset_index()
         ranking_counts.columns = ['dominio', 'frecuencia']
 
-        # Crear el gráfico de barras
         fig_ranking = px.bar(
             ranking_counts, 
             x='dominio', 
             y='frecuencia', 
             color='dominio',
             title=f"Frecuencia de Aparición en Rango de Precio: '{selected_level_for_ranking.title()}'",
-            labels={'dominio':'Competidor', 'frecuencia':'Número de Apariciones'}
+            labels={'dominio':'Competidor', 'frecuencia':'Número de Apariciones'},
+            color_discrete_map=color_map # Aplicar mapa de colores
         )
         st.plotly_chart(fig_ranking, use_container_width=True)
 
@@ -252,7 +256,8 @@ else:
             fig_snapshot = px.bar(
                 snapshot_df, x='dominio', y='price', color='dominio',
                 title=f"Precios para '{selected_product_for_bar}' el {selected_date_for_bar}",
-                labels={'dominio':'Competidor', 'price':'Precio'}, text='price'
+                labels={'dominio':'Competidor', 'price':'Precio'}, text='price',
+                color_discrete_map=color_map # Aplicar mapa de colores
             )
             fig_snapshot.update_traces(texttemplate='%{text}', textposition='outside')
             st.plotly_chart(fig_snapshot, use_container_width=True)
